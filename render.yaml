@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: xclipse-wordpress-mcp
+    runtime: node
+    rootDir: mcp-server
+    buildCommand: npm ci --omit=dev
+    startCommand: node src/index.js --http
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MCP_TRANSPORT
+        value: http
+      - key: XCLIPSE_TOOL_MODE
+        value: compact
+      - key: XCLIPSE_URL
+        sync: false
+      - key: XCLIPSE_API_KEY
+        sync: false
+      - key: MCP_AUTH_TOKEN
+        generateValue: true

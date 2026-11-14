@@ -1,182 +1,26 @@
 /**
- * MCP Server v4.9.1 — Xclipse
- * Tối ưu token: compact JSON, mô tả ngắn gọn, chỉ trả fields cần thiết.
- * v4.9.1: timeout/retry cho api(), bọc lỗi + cắt output cho mọi tool, profile nhóm tool (XCLIPSE_TOOLS), .env loader chắc hơn.
+ * Xclipse WordPress MCP Server v5.0.0
+ * - Dual transport: Stdio (local) & Streamable HTTP URL (Gemini Spark, Claude, Cursor, Cloud)
+ * - Token optimization: compact JSON, response compaction, compact gateway mode (xclipse_discover + xclipse_call)
+ * - Reliability: TTL GET cache, retry with backoff/429, structured error classification
  */
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { readFileSync, existsSync } from 'fs';
-import { resolve, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import {
+  VERSION,
+  getEnvConfig,
+  api,
+  j,
+  ok,
+  Pager,
+  Status,
+  qs,
+  registerCatalogTool,
+  createMcpServer,
+} from './core.js';
+import { startHttpServer } from './http.js';
 
-const __dir = dirname(fileURLToPath(import.meta.url));
-
-let VERSION = '4.9.1';
-try { VERSION = JSON.parse(readFileSync(resolve(__dir, '..', 'package.json'), 'utf8')).version || VERSION; } catch {}
-
-const envPath = resolve(__dir, '..', '.env');
-if (existsSync(envPath))
-  for (const raw of readFileSync(envPath, 'utf8').replace(/^﻿/, '').split(/\r?\n/)) {
-    let line = raw.replace(/\r/g, '').trim();
-    if (!line || line.startsWith('#')) continue;
-    line = line.replace(/^export\s+/, '');
-    const i = line.indexOf('=');
-    if (i < 1) continue;
-    const k = line.slice(0, i).trim();
-    let v = line.slice(i + 1).trim();
-    if (v.length >= 2 && ((v[0] === '"' && v.endsWith('"')) || (v[0] === "'" && v.endsWith("'")))) v = v.slice(1, -1);
-    if (!(k in process.env)) process.env[k] = v;
-  }
-
-const BASE = (process.env.XCLIPSE_URL || '').replace(/\/$/, '');
-const KEY  = process.env.XCLIPSE_API_KEY || '';
-if (!BASE || !KEY) { console.error('[XCLIPSE] ❌ Thiếu XCLIPSE_URL hoặc XCLIPSE_API_KEY'); process.exit(1); }
-try {
-  const host = new URL(BASE).hostname;
-  if (!/localhost|127\.0\.0\.1|\.local$|\.test$/i.test(host)) console.error(`[XCLIPSE] ⚠ đang trỏ site thật: ${host}`);
-} catch { console.error(`[XCLIPSE] ⚠ XCLIPSE_URL không hợp lệ: ${BASE}`); }
-
-const TIMEOUT_MS = Math.max(1, parseInt(process.env.XCLIPSE_TIMEOUT_MS, 10) || 30000);
-const MAX_OUT    = Math.max(100, parseInt(process.env.XCLIPSE_MAX_OUT, 10) || 12000);
-const RETRY_DELAYS = [500, 1500];
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/** Dịch lỗi mạng sang thông báo tiếng Việt hữu ích. Trả về Error có cờ .net=true */
-function netError(e) {
-  const code = e?.cause?.code || e?.code || '';
-  const raw  = e?.cause?.message || e?.message || String(e);
-  const hint = `Kiểm tra: XCLIPSE_URL (${BASE}) đúng http/https chưa, site có đang chạy không, firewall/hosting có chặn không.`;
-  let msg;
-  if (e?.name === 'TimeoutError' || e?.name === 'AbortError' || code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT')
-    msg = `Hết thời gian chờ (${TIMEOUT_MS}ms) khi gọi ${BASE}. Site phản hồi quá chậm hoặc bị treo. ${hint} Có thể tăng XCLIPSE_TIMEOUT_MS.`;
-  else if (code === 'ECONNREFUSED') msg = `Kết nối bị từ chối (ECONNREFUSED) tới ${BASE}. ${hint}`;
-  else if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') msg = `Không phân giải được tên miền của ${BASE} (${code}). ${hint}`;
-  else if (code === 'ECONNRESET' || code === 'UND_ERR_SOCKET') msg = `Kết nối bị ngắt giữa chừng (${code}). ${hint}`;
-  else if (/CERT|SSL|TLS|SELF_SIGNED|UNABLE_TO_VERIFY|DEPTH_ZERO/i.test(code + ' ' + raw))
-    msg = `Lỗi chứng chỉ SSL/TLS (${code || raw}). Kiểm tra chứng chỉ của site hoặc thử dùng http cho môi trường local. ${hint}`;
-  else msg = `Lỗi mạng khi gọi ${BASE}: ${raw}. ${hint}`;
-  const err = new Error(msg);
-  err.net = true; err.code = code;
-  return err;
-}
-
-const cleanSnippet = (t) => String(t).replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
-
-async function apiOnce(path, method, body) {
-  let res, text;
-  try {
-    res  = await fetch(`${BASE}/wp-json/xclipse-mcp/v1${path}`, {
-      method,
-      headers: { 'X-MCP-Key': KEY, 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    });
-    text = await res.text();
-  } catch (e) { throw netError(e); }
-  let json, parsed = true;
-  if (text === '') json = {};
-  else { try { json = JSON.parse(text); } catch { parsed = false; } }
-  if (!parsed) {
-    const err = new Error(`HTTP ${res.status}: ${cleanSnippet(text)}`);
-    err.status = res.status;
-    throw err;
-  }
-  if (!res.ok) {
-    const err = new Error((json && typeof json === 'object' && json.message) || `HTTP ${res.status}`);
-    err.status = res.status;
-    throw err;
-  }
-  return json;
-}
-
-async function api(path, method = 'GET', body = null) {
-  method = String(method).toUpperCase();
-  const canRetry = method === 'GET';
-  for (let attempt = 0; ; attempt++) {
-    try { return await apiOnce(path, method, body); }
-    catch (e) {
-      const retryable = canRetry && attempt < RETRY_DELAYS.length &&
-        (e.net || e.status === 502 || e.status === 503 || e.status === 504);
-      if (!retryable) throw e;
-      if (process.env.XCLIPSE_DEBUG) console.error(`[XCLIPSE] retry ${attempt + 1} ${method} ${path}: ${e.message.slice(0, 80)}`);
-      await sleep(RETRY_DELAYS[attempt]);
-    }
-  }
-}
-
-/** Không dùng indent (null,2) — tiết kiệm ~30% token so với pretty-print */
-const j = (d) => ({ content: [{ type: 'text', text: JSON.stringify(d) }] });
-/** Text ngắn gọn cho các action thành công */
-const ok = (msg, extra = {}) => ({ content: [{ type: 'text', text: JSON.stringify({ ok: true, msg, ...extra }) }] });
-
-const Pager = { per_page: z.number().default(20), page: z.number().default(1) };
-const Status = (vals, def = 'publish') => ({ status: z.enum(vals).default(def) });
-
-/** Helper: URLSearchParams bỏ qua null/undefined/'' */
-const qs = (p) => new URLSearchParams(
-  Object.fromEntries(Object.entries(p).filter(([,v]) => v != null && v !== '').map(([k,v]) => [k, String(v)]))
-);
-
-const server = new McpServer({ name: 'xclipse', version: VERSION });
-
-// ── Lớp bọc server.tool: profile nhóm, bắt lỗi, cắt output ──
-const TOOL_GROUPS = [
-  [/^(products?|orders?|coupons?|customers?|shipping|tax|payment|wc|bulk_products)_/, 'woo'],
-  [/^(rankmath|audit|fix_seo|serp|rank|sitemap|schema|rich|url)_/, 'seo'],
-  [/^elementor_/, 'elementor'],
-  [/^(ux|uxb|flatsome)_/, 'flatsome'],
-  [/^(lscache|cache)_/, 'cache'],
-  [/^pixta_/, 'pixta'],
-  [/^cf7_/, 'forms'],
-  [/^wpms_/, 'mail'],
-];
-const groupOf = (name) => { for (const [re, g] of TOOL_GROUPS) if (re.test(name)) return g; return 'core'; };
-const ENABLED = new Set(String(process.env.XCLIPSE_TOOLS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
-const toolStats = { registered: 0, total: 0 };
-
-const safeCut = (s, n) => {
-  if (s.length <= n) return s;
-  let e = n; const c = s.charCodeAt(e - 1);
-  if (c >= 0xD800 && c <= 0xDBFF) e--;
-  return s.slice(0, e);
-};
-function limitOutput(res) {
-  if (!res || !Array.isArray(res.content)) return res;
-  let total = 0;
-  for (const c of res.content) if (c && c.type === 'text' && typeof c.text === 'string') total += c.text.length;
-  if (total <= MAX_OUT) return res;
-  let left = MAX_OUT; const out = [];
-  for (const c of res.content) {
-    if (c && c.type === 'text' && typeof c.text === 'string') {
-      if (left <= 0) continue;
-      const t = safeCut(c.text, left); left -= t.length;
-      out.push({ ...c, text: t });
-    } else out.push(c);
-  }
-  out.push({ type: 'text', text: JSON.stringify({ truncated: true, total_chars: total, hint: 'dùng per_page/page/fields/offset hoặc tool *_get để lấy phần nhỏ hơn' }) });
-  return { ...res, content: out };
-}
-const origTool = server.tool.bind(server);
-server.tool = (...args) => {
-  const name = args[0];
-  toolStats.total++;
-  const g = groupOf(name);
-  if (ENABLED.size && g !== 'core' && !ENABLED.has(g)) return undefined;
-  toolStats.registered++;
-  const last = args.length - 1;
-  if (typeof args[last] === 'function') {
-    const h = args[last];
-    args[last] = async (...a) => {
-      try { return limitOutput(await h(...a)); }
-      catch (e) {
-        const message = e && e.message ? e.message : String(e);
-        return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: message }) }] };
-      }
-    };
-  }
-  return origTool(...args);
-};
+const server = { tool: registerCatalogTool };
 
 // INFO
 server.tool('site_info', 'Thông tin website: WP version, WooCommerce, RankMath, Burst, theme.', {}, async () => j(await api('/info')));
@@ -3245,14 +3089,48 @@ server.tool('wpms_send_errors', 'WP Mail SMTP: lỗi gửi mail theo connection.
 server.tool('wpms_send_errors_clear', 'WP Mail SMTP: xoá lỗi gửi mail.', { connection_id: z.string().optional() },
   async (b) => j(await api('/wpms/send-errors', 'DELETE', b)));
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
-console.error(`[XCLIPSE v${VERSION}] OK ${BASE} | tools ${toolStats.registered}/${toolStats.total}${ENABLED.size ? ' (XCLIPSE_TOOLS=' + [...ENABLED].join(',') + ')' : ''} | ${new Date().toLocaleTimeString('vi-VN')}`);
-// Kiểm tra phiên bản plugin, không chặn khởi động
-(async () => {
+const isHttp =
+  process.argv.includes('--http') ||
+  /^(http|streamable-http)$/i.test(process.env.MCP_TRANSPORT || '') ||
+  Boolean(process.env.PORT);
+
+if (isHttp) {
+  await startHttpServer();
+} else {
+  const env = getEnvConfig();
+  if (!env.base || !env.key) {
+    console.error('[XCLIPSE] ❌ Thiếu XCLIPSE_URL hoặc XCLIPSE_API_KEY');
+    process.exit(1);
+  }
   try {
-    const r = await fetch(`${BASE}/wp-json/xclipse-mcp/v1/info`, { headers: { 'X-MCP-Key': KEY }, signal: AbortSignal.timeout(5000) });
-    const d = JSON.parse(await r.text());
-    if (d && d.api_v && d.api_v !== VERSION) console.error(`[XCLIPSE] ⚠ plugin WP v${d.api_v} khác MCP server v${VERSION}`);
-  } catch (e) { console.error(`[XCLIPSE] ⚠ không kiểm tra được plugin lúc khởi động: ${String(e.message).slice(0, 80)}`); }
-})();
+    const host = new URL(env.base).hostname;
+    if (!/localhost|127\.0\.0\.1|\.local$|\.test$/i.test(host)) {
+      console.error(`[XCLIPSE] ⚠ đang trỏ site thật: ${host}`);
+    }
+  } catch {
+    console.error(`[XCLIPSE] ⚠ XCLIPSE_URL không hợp lệ: ${env.base}`);
+  }
+
+  const { server: mcpServer, stats } = createMcpServer();
+  const transport = new StdioServerTransport();
+  await mcpServer.connect(transport);
+  console.error(
+    `[XCLIPSE v${VERSION}] OK ${env.base} | mode=${stats.mode} | tools ${stats.registered}/${stats.total}${env.tools.length ? ' (XCLIPSE_TOOLS=' + env.tools.join(',') + ')' : ''} | ${new Date().toLocaleTimeString('vi-VN')}`
+  );
+  // Kiểm tra phiên bản plugin, không chặn khởi động
+  (async () => {
+    try {
+      const r = await fetch(`${env.base}/wp-json/xclipse-mcp/v1/info`, {
+        headers: { 'X-MCP-Key': env.key },
+        signal: AbortSignal.timeout(5000),
+      });
+      const d = JSON.parse(await r.text());
+      if (d && d.api_v && d.api_v !== VERSION) {
+        console.error(`[XCLIPSE] ⚠ plugin WP v${d.api_v} khác MCP server v${VERSION}`);
+      }
+    } catch (e) {
+      console.error(`[XCLIPSE] ⚠ không kiểm tra được plugin lúc khởi động: ${String(e.message).slice(0, 80)}`);
+    }
+  })();
+}
+
