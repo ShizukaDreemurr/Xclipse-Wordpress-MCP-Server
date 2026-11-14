@@ -1,6 +1,6 @@
 /**
  * Xclipse Remote MCP Server (Streamable HTTP Transport)
- * Compatible with Gemini Spark, Claude Remote MCP, Cursor, MCP Inspector, etc.
+ * Compatible with Gemini Spark, Claude Remote MCP, Cursor, MCP Inspector, Vercel, Render, Docker.
  */
 import http from 'node:http';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -14,6 +14,7 @@ import {
 } from './core.js';
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10MB (supports base64 media uploads)
+const startedAt = Date.now();
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -100,63 +101,61 @@ function resolveRequestContext(req, urlObj) {
   };
 }
 
-export function startHttpServer({ port = parseInt(process.env.PORT, 10) || 3000, host = process.env.HOST || '0.0.0.0' } = {}) {
-  const startedAt = Date.now();
+export async function handleHttpRequest(req, res, preParsedBody = undefined) {
+  setCors(res);
 
-  const httpServer = http.createServer(async (req, res) => {
-    setCors(res);
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
 
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
+  const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const pathname = urlObj.pathname.replace(/\/+$/, '') || '/';
 
-    const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-    const pathname = urlObj.pathname.replace(/\/+$/, '') || '/';
+  if (req.method === 'GET' && (pathname === '/' || pathname === '/health' || pathname === '/api/mcp' && urlObj.searchParams.has('health'))) {
+    const env = getEnvConfig();
+    return sendJson(res, 200, {
+      ok: true,
+      name: 'xclipse-mcp',
+      version: VERSION,
+      transport: 'streamable-http',
+      mode: env.mode,
+      catalog_tools: TOOL_CATALOG.length,
+      groups: ALL_GROUPS,
+      configured_wp: Boolean(env.base && env.key),
+      auth_required: Boolean(process.env.MCP_AUTH_TOKEN),
+      endpoints: { mcp: '/mcp', health: '/health' },
+      uptime_s: Math.floor((Date.now() - startedAt) / 1000),
+    });
+  }
 
-    if (req.method === 'GET' && (pathname === '/' || pathname === '/health')) {
-      const env = getEnvConfig();
-      return sendJson(res, 200, {
-        ok: true,
-        name: 'xclipse-mcp',
-        version: VERSION,
-        transport: 'streamable-http',
-        mode: env.mode,
-        catalog_tools: TOOL_CATALOG.length,
-        groups: ALL_GROUPS,
-        configured_wp: Boolean(env.base && env.key),
-        auth_required: Boolean(process.env.MCP_AUTH_TOKEN),
-        endpoints: { mcp: '/mcp', health: '/health' },
-        uptime_s: Math.floor((Date.now() - startedAt) / 1000),
-      });
-    }
+  if (pathname !== '/mcp' && pathname !== '/api/mcp') {
+    return sendJson(res, 404, { error: 'Not Found', endpoints: ['/mcp', '/health'] });
+  }
 
-    if (pathname !== '/mcp') {
-      return sendJson(res, 404, { error: 'Not Found', endpoints: ['/mcp', '/health'] });
-    }
+  if (!checkAuth(req, urlObj)) {
+    return sendJson(res, 401, {
+      jsonrpc: '2.0',
+      error: { code: -32001, message: 'Unauthorized: invalid or missing MCP_AUTH_TOKEN' },
+      id: null,
+    });
+  }
 
-    if (!checkAuth(req, urlObj)) {
-      return sendJson(res, 401, {
-        jsonrpc: '2.0',
-        error: { code: -32001, message: 'Unauthorized: invalid or missing MCP_AUTH_TOKEN' },
-        id: null,
-      });
-    }
+  if (req.method === 'GET' || req.method === 'DELETE') {
+    return sendJson(res, 405, {
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Method not allowed in stateless Streamable HTTP mode. Use POST /mcp.' },
+      id: null,
+    });
+  }
 
-    if (req.method === 'GET' || req.method === 'DELETE') {
-      return sendJson(res, 405, {
-        jsonrpc: '2.0',
-        error: { code: -32000, message: 'Method not allowed in stateless Streamable HTTP mode. Use POST /mcp.' },
-        id: null,
-      });
-    }
+  if (req.method !== 'POST') {
+    return sendJson(res, 405, { error: 'Method Not Allowed' });
+  }
 
-    if (req.method !== 'POST') {
-      return sendJson(res, 405, { error: 'Method Not Allowed' });
-    }
-
-    let body;
+  let body = preParsedBody;
+  if (body === undefined) {
     try {
       body = await readJsonBody(req);
     } catch (e) {
@@ -166,33 +165,37 @@ export function startHttpServer({ port = parseInt(process.env.PORT, 10) || 3000,
         id: null,
       });
     }
+  }
 
-    const ctx = resolveRequestContext(req, urlObj);
-    const { server } = createMcpServer({ mode: ctx.mode, tools: ctx.tools });
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
-
-    res.on('close', () => {
-      try { transport.close(); } catch {}
-      try { server.close(); } catch {}
-    });
-
-    try {
-      await requestStore.run(ctx, async () => {
-        await server.connect(transport);
-        await transport.handleRequest(req, res, body);
-      });
-    } catch (e) {
-      if (!res.headersSent) {
-        sendJson(res, 500, {
-          jsonrpc: '2.0',
-          error: { code: -32603, message: e?.message || 'Internal server error' },
-          id: null,
-        });
-      }
-    }
+  const ctx = resolveRequestContext(req, urlObj);
+  const { server } = createMcpServer({ mode: ctx.mode, tools: ctx.tools });
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
   });
+
+  res.on('close', () => {
+    try { transport.close(); } catch {}
+    try { server.close(); } catch {}
+  });
+
+  try {
+    await requestStore.run(ctx, async () => {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, body);
+    });
+  } catch (e) {
+    if (!res.headersSent) {
+      sendJson(res, 500, {
+        jsonrpc: '2.0',
+        error: { code: -32603, message: e?.message || 'Internal server error' },
+        id: null,
+      });
+    }
+  }
+}
+
+export function startHttpServer({ port = parseInt(process.env.PORT, 10) || 3000, host = process.env.HOST || '0.0.0.0' } = {}) {
+  const httpServer = http.createServer((req, res) => handleHttpRequest(req, res));
 
   return new Promise((resolve) => {
     httpServer.listen(port, host, () => {

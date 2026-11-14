@@ -3089,12 +3089,16 @@ server.tool('wpms_send_errors', 'WP Mail SMTP: lỗi gửi mail theo connection.
 server.tool('wpms_send_errors_clear', 'WP Mail SMTP: xoá lỗi gửi mail.', { connection_id: z.string().optional() },
   async (b) => j(await api('/wpms/send-errors', 'DELETE', b)));
 
+const noAutoStart = process.env.MCP_NO_AUTOSTART === '1' || process.env.VERCEL === '1';
+
 const isHttp =
   process.argv.includes('--http') ||
   /^(http|streamable-http)$/i.test(process.env.MCP_TRANSPORT || '') ||
   Boolean(process.env.PORT);
 
-if (isHttp) {
+if (noAutoStart) {
+  // Imported as library (e.g., Vercel serverless handler)
+} else if (isHttp) {
   await startHttpServer();
 } else {
   const env = getEnvConfig();
