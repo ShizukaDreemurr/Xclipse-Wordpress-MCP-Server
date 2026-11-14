@@ -1,15 +1,15 @@
 <?php
 /**
  * Plugin Name: Xclipse - MCP API
- * Version:     4.9.3
- * Description: REST API đầy đủ cho Claude MCP — tối ưu token, compact response.
+ * Version:     5.0.0
+ * Description: REST API đầy đủ cho Claude / Gemini MCP — tối ưu token, compact response.
  * Author:      Khôi Nguyên
  * Requires at least: 6.0
  * Requires PHP: 7.4
  */
 defined('ABSPATH') || exit;
 
-define('XCLIPSE_MCP_VERSION', '4.9.3');
+define('XCLIPSE_MCP_VERSION', '5.0.0');
 
 // ─── Activation ──────────────────────────────────────────────────────────────
 register_activation_hook(__FILE__, function () {
