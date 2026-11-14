@@ -1,6 +1,7 @@
 services:
   - type: web
     name: xclipse-wordpress-mcp
+    plan: free
     runtime: node
     rootDir: mcp-server
     buildCommand: npm ci --omit=dev
