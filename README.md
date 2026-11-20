@@ -1,11 +1,11 @@
 # Xclipse WordPress MCP Server (Lite / Core Edition)
 
-[![Full 390+ Tool Pro Suite on Agensi.io](https://img.shields.io/badge/Agensi.io-Full%20390%2B%20Tool%20Pro%20Suite%20(%2429)-6366f1?style=for-the-badge)](https://agensi.io/creators/xclipse-x)
+[![Full 390+ Tool Pro Suite on Agensi.io](https://img.shields.io/badge/Agensi.io-Full%20390%2B%20Tool%20Pro%20Suite%20(%2429)-6366f1?style=for-the-badge)](https://www.agensi.io/r/XCLIPEWPMCPSRVR)
 
 Open-source **Core Lite** edition of **Xclipse WordPress MCP Server** — connect Claude Code, Cursor, GitHub Copilot, Windsurf, or Gemini to your WordPress site for basic content, pages, media, taxonomy, and comment management.
 
 > **Want WooCommerce, Elementor, Flatsome, Rank Math SEO, LiteSpeed Cache, CF7, WP Mail SMTP, Batch & Audit?**  
-> **[Upgrade to the Full 390+ Tool Pro Suite on Agensi.io ($29) →](https://agensi.io/creators/xclipse-x)**
+> **[Upgrade to the Full 390+ Tool Pro Suite on Agensi.io ($29) →](https://www.agensi.io/r/XCLIPEWPMCPSRVR)**
 
 ---
 
